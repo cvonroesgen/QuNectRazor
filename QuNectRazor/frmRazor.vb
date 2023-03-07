@@ -21,6 +21,7 @@ Public Class frmRazor
     Private fieldCharacterSettings = New ArrayList
 
     Private Class tests
+        Public Const parseUTF8 = "Check for UTF-8 parsing errors"
         Public Const dupes = "Check for Duplicate Column Names"
         Public Const findParsingProblems = "Check for SQL Parsing Errors due to Column Names"
         Public Const empty = "Find Empty Columns"
@@ -59,6 +60,7 @@ Public Class frmRazor
         fieldCharacterSettings.Add("lnunc")
         fieldCharacterSettings.Add("letters numbers underscores no colons")
         cmbTests.Items.Add("Choose an Analysis")
+        cmbTests.Items.Add(tests.parseUTF8)
         cmbTests.Items.Add(tests.dupes)
         cmbTests.Items.Add(tests.findParsingProblems)
         cmbTests.Items.Add(tests.empty)
@@ -346,12 +348,16 @@ Public Class frmRazor
             Exit Sub
         End If
         txtResult.Visible = False
+        txtResult.Text = ""
         tvFields.Visible = False
         Me.Cursor = Cursors.WaitCursor
         Application.DoEvents()
         Try
             If cmbTables.SelectedIndex = 0 Then
                 MsgBox("Please Choose a Table", MsgBoxStyle.OkOnly, AppName)
+            ElseIf cmbTests.Text = tests.parseUTF8 Then
+                txtResult.Visible = True
+                findUTF8ParseErrors()
             ElseIf cmbTests.Text = tests.dupes Then
                 txtResult.Visible = True
                 findDupeColumnNames()
@@ -427,6 +433,69 @@ Public Class frmRazor
         Next
         txtResult.Text = "Out of the " & rowcount & " rows you have access to, the following columns have no data." & vbCrLf & message
     End Sub
+    Private Sub findUTF8ParseErrors()
+        txtResult.Text = ""
+        Dim colDictionary As New Dictionary(Of String, String)
+        Dim fidArray As New ArrayList
+        Dim quNectConn As OdbcConnection = getquNectConn("all;IGNOREDUPEFIELDNAMES=1;PARSEUTF8=1")
+        Dim tableName As String = cmbTables.Items(cmbTables.SelectedIndex)
+        Dim dbid = tableName.Split(" ")(tableName.Split(" ").Length - 1)
+        If Not quNectConn Is Nothing Then
+            Dim restrictions(3) As String
+            restrictions(2) = dbid 'catalog, owner, table, column
+            Dim columns = quNectConn.GetSchema("Columns", restrictions)
+            Dim findTextFields As Regex = New Regex("Text (fid\d+)", RegexOptions.IgnoreCase)
+            For i = 0 To columns.Rows.Count - 1
+                Application.DoEvents()
+                Dim remarks As String = columns.Rows(i)("REMARKS")
+                Dim isTextField = findTextFields.Match(remarks)
+                If isTextField.Success Then
+                    Dim strFID = isTextField.Groups(1).Value
+                    colDictionary.Add(strFID, columns.Rows(i)("COLUMN_NAME"))
+                    fidArray.Add(strFID)
+                End If
+            Next
+        End If
+        If fidArray.Count = 0 Then
+            txtResult.Text = "There are no text fields in this table."
+            quNectConn.Dispose()
+            Exit Sub
+        End If
+        Dim selectFieldList As String = ""
+        Dim comma As String = ""
+        For Each fid In fidArray
+            selectFieldList &= comma & fid
+            comma = ","
+        Next
+        Dim quickBaseSQL As String = "SELECT " & selectFieldList & " from [" & dbid & "]"
+        Dim quNectCmd = New OdbcCommand(quickBaseSQL, quNectConn)
+        Try
+            Dim dr = quNectCmd.ExecuteReader()
+            While dr.Read()
+                dr.GetString(0)
+            End While
+        Catch excpt As Exception
+
+            Dim findDBIDridFID = New Regex("dbid:(\w+)\s+rid:(\d+)\s+fid:(\d+)", RegexOptions.IgnoreCase)
+            Dim DBIDridFID = findDBIDridFID.Match(excpt.Message)
+            If DBIDridFID.Success Then
+                Dim rid = DBIDridFID.Groups(2).Value
+                Dim fid = DBIDridFID.Groups(3).Value
+                txtResult.Text = "In table '" & tableName & "', within record " & rid & ", within field '" & colDictionary("fid" & fid) & "' whose field identifier (fid) is " & fid & ", one or more characters are not UTF-8 compliant."
+                Process.Start("https://" & txtServer.Text & "/db/" & DBIDridFID.Groups(1).Value & "?a=q&query={'3'.EX.'" & rid & "'}&clist=" & fid)
+            Else
+                txtResult.Text = excpt.Message
+            End If
+
+            quNectCmd.Dispose()
+            quNectConn.Dispose()
+            Exit Sub
+        End Try
+        quNectCmd.Dispose()
+        quNectConn.Dispose()
+        txtResult.Text = "No UTF-8 parsing errors"
+    End Sub
+
     Private Sub listFields()
         Me.Cursor = Cursors.WaitCursor
         Dim dbid As String = cmbTables.Items(cmbTables.SelectedIndex)
